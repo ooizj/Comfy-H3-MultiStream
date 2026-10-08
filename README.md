@@ -5,6 +5,8 @@ SPDX-License-Identifier: GPL-3.0-only
 
 # ComfyUI-H3-MultiStream
 
+> This fork's `codex/windows-vae-ready` branch includes the Windows VAE worker support and the worker root/attention-setting fixes submitted upstream in PRs [#3](https://github.com/martonsagi/Comfy-H3-MultiStream/pull/3) and [#4](https://github.com/martonsagi/Comfy-H3-MultiStream/pull/4). Both fixes are included in this branch regardless of their upstream merge status.
+
 Multi-GPU acceleration and caching for **MiniMax H3** video generation in ComfyUI.
 
 [![First frame of the sample render](docs/demo/h3_multistream_demo1.png)](docs/demo/)
@@ -61,7 +63,7 @@ There are no extra Python dependencies. Everything used (`torch`, `psutil`, `tqd
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/martonsagi/Comfy-H3-MultiStream ComfyUI-H3-MultiStream
+git clone --branch codex/windows-vae-ready --single-branch https://github.com/ooizj/Comfy-H3-MultiStream.git ComfyUI-H3-MultiStream
 ```
 
 Restart ComfyUI. The nodes appear under `advanced/model`, `advanced/conditioning` and `advanced/latent`. An **H3 MultiStream** entry is added to the main menu.
