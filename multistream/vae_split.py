@@ -147,13 +147,14 @@ class _Worker:
         env["H3MS_AUTHKEY"] = authkey.hex()
         env["PYTHONPATH"] = _COMFY_ROOT + os.pathsep + env.get("PYTHONPATH", "")
         log_file = open(self.log_path, "w")
-        attention_flags = ["--" + name.replace("_", "-") for name in (
+        worker_flags = ["--" + name.replace("_", "-") for name in (
             "use_split_cross_attention", "use_quad_cross_attention", "use_pytorch_cross_attention",
             "use_sage_attention", "use_flash_attention", "use_ck_attention",
-            "force_upcast_attention", "dont_upcast_attention", "disable_xformers") if getattr(args, name)]
+            "force_upcast_attention", "dont_upcast_attention", "disable_xformers",
+            "disable_pinned_memory", "disable_async_offload") if getattr(args, name)]
         t0 = time.perf_counter()
         log.info("[VAE split] starting worker process for %s (log %s)", self.name, self.log_path)
-        self.proc = subprocess.Popen([sys.executable, _WORKER_SCRIPT, *attention_flags, "--address", address,
+        self.proc = subprocess.Popen([sys.executable, _WORKER_SCRIPT, *worker_flags, "--address", address,
                                       "--parent-pid", str(os.getpid()), "--comfy-root", _COMFY_ROOT,
                                       "--gpu", self._suffix[3:]],
                                      env=env, cwd=_COMFY_ROOT, stdout=log_file, stderr=log_file,
