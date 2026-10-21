@@ -33,6 +33,7 @@ comfy.memory_management.aimdo_enabled = True
 comfy_aimdo.control.set_log_info()
 
 import comfy.ops  # noqa: E402
+import comfy.quant_ops  # noqa: E402
 import comfy.sd  # noqa: E402
 from comfy.quant_ops import QuantizedTensor  # noqa: E402
 
@@ -51,7 +52,7 @@ def describe(name, t):
     inner = t
     extra = ""
     if isinstance(t, QuantizedTensor):
-        qd, sc = comfy.ops.TensorWiseINT8Layout.get_plain_tensors(t)
+        qd, sc = comfy.quant_ops.TensorWiseINT8Layout.get_plain_tensors(t)
         inner = qd
         extra = f" qdata.dev={qd.device} scale.dev={sc.device}"
     st = inner.untyped_storage()

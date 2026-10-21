@@ -565,7 +565,7 @@ def _rows_linear_fn(lin, like, idx):
     b = bias.index_select(0, idx) if bias is not None else None
     if (isinstance(weight, QuantizedTensor) and weight._layout_cls == "TensorWiseINT8Layout"
             and not getattr(weight._params, "transposed", False) and _int8_kernel_available()):
-        qd, sc = comfy.ops.TensorWiseINT8Layout.get_plain_tensors(weight)
+        qd, sc = comfy.quant_ops.TensorWiseINT8Layout.get_plain_tensors(weight)
         qd = qd.index_select(0, idx).contiguous()
         sc = sc.index_select(0, idx).contiguous()
         code = _dtype_code(like.dtype)
