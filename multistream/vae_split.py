@@ -184,11 +184,13 @@ class _Worker:
         log.info("[VAE split] worker for %s connected in %.1fs (pid %d)", self.name, time.perf_counter() - t0,
                  self.proc.pid)
 
-    def _recv(self, timeout=None):
+    def _recv(self, timeout=None, interruptible=False):
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             if self.conn.poll(1.0):
                 return self.conn.recv()
+            if interruptible:
+                mm.throw_exception_if_processing_interrupted()
             if self.proc.poll() is not None:
                 tail = _log_tail(self.log_path)
                 log.error("[VAE split] worker on %s died with exit code %s. Last log lines:\n%s", self.name,
@@ -231,6 +233,17 @@ class _Worker:
                      self.jobs_done)
         self.conn = None
         self.loaded_path = None
+
+    def kill(self, reason):
+        with self.lock:
+            pid = self.proc.pid
+            self.proc.kill()
+            self.proc.wait()
+            self.conn.close()
+            self.proc = self.conn = None
+            self.loaded_path = None
+        log.warning("[VAE split] worker on %s (pid %s) stopped: %s; it restarts at the next decode", self.name, pid,
+                    reason)
 
 
 _WORKERS = {}   # (gpu_index, slot) -> _Worker
@@ -446,9 +459,6 @@ def _choose_transport(m0, z, spans, n_remote):
 def _discard(worker, msg):
     """Free what a stale chunk message (from an abandoned job) still holds."""
     log.warning("[VAE split] discarding stale chunk %s from job %s (worker %s)", msg[2], msg[1], worker.name)
-    if msg[0] == "chunkb":
-        worker.conn.recv_bytes()
-        return
     try:
         stale = _shm_open(name=msg[3])
         stale.close()
@@ -517,10 +527,6 @@ def _split_decode_temporal(m0, workers, z, output_buffer):
              "transport %s | %s", job_ids, tuple(z.shape[:2]) + (latent_t,) + tuple(z.shape[3:]),
              output_buffer.shape[2], num_chunks, n_ranks, num_chunks - n_remote, dev0,
              ", ".join(f"{len(r)} on {w.name}" for w, r in zip(workers, remote)), transport, vram(dev0))
-    for w, jid, chunks in zip(workers, job_ids, remote):
-        if chunks:
-            with w.lock:
-                w.conn.send(("job", jid, chunks, transport))
     results = [{} for _ in workers]
     done = [not r for r in remote]
     stats = [{} for _ in workers]
@@ -529,7 +535,7 @@ def _split_decode_temporal(m0, workers, z, output_buffer):
     def pump(k):
         """Receive one message from worker k and file it."""
         w, jid = workers[k], job_ids[k]
-        msg = w._recv()
+        msg = w._recv(interruptible=True)
         if msg[0] in ("chunk", "chunkb") and msg[1] == jid:
             results[k][msg[2]] = _fetch_chunk(w, msg, dev0)
             log.debug("[VAE split] job %d: chunk %d received from %s (%.2fs on worker)", jid, msg[2], w.name, msg[6])
@@ -539,7 +545,7 @@ def _split_decode_temporal(m0, workers, z, output_buffer):
         elif msg[0] == "error":
             log.error("[VAE split] job %s: worker %s failed:\n%s", msg[1], w.name, msg[2])
             raise WorkerError(f"VAE worker {w.name} failed:\n{msg[2]}")
-        elif msg[0] in ("chunk", "chunkb"):
+        elif msg[0] == "chunk":
             _discard(w, msg)
 
     def next_remote(i, k):
@@ -569,40 +575,52 @@ def _split_decode_temporal(m0, workers, z, output_buffer):
             dec[:, :, write_pos:write_pos + copy_frames, :, :].copy_(part[:, :, :copy_frames, :, :])
             write_pos += copy_frames
 
-    for i in range(num_chunks):
-        mm.throw_exception_if_processing_interrupted()
-        owner = i % n_ranks
-        if owner == 0:
-            tl = time.perf_counter()
-            s, e = spans[i]
-            clip_dec = m0._adaptive_decode(z[:, :, s:e, :, :])
-            dt = time.perf_counter() - tl
-            local_seconds += dt
-            log.debug("[VAE split] local chunk %d decoded in %.2fs", i, dt)
-        else:
-            clip_dec = next_remote(i, owner - 1)
-        for j in range(split_count):
-            f_start_idx = j * chunk_dec
-            f_end_idx = min(f_start_idx + chunk_dec, clip_dec.shape[2])
-            clip_dec_chunk = clip_dec[:, :, f_start_idx:f_end_idx, :, :]
-            clip_dec_chunk = clip_dec_chunk[:, :, m0.frame_pre_padding:, :, :]
-            if j == 0:
-                if dec_overlap is not None:
-                    clip_dec_chunk = m0.blend(dec_overlap, clip_dec_chunk, m0.frame_overlap, dim=-3)
-                    dec_overlap = None
-                write_part(clip_dec_chunk)
+    try:
+        for w, jid, chunks in zip(workers, job_ids, remote):
+            if chunks:
+                with w.lock:
+                    w.conn.send(("job", jid, chunks, transport))
+        for i in range(num_chunks):
+            mm.throw_exception_if_processing_interrupted()
+            owner = i % n_ranks
+            if owner == 0:
+                tl = time.perf_counter()
+                s, e = spans[i]
+                clip_dec = m0._adaptive_decode(z[:, :, s:e, :, :])
+                dt = time.perf_counter() - tl
+                local_seconds += dt
+                log.debug("[VAE split] local chunk %d decoded in %.2fs", i, dt)
             else:
-                dec_overlap = clip_dec_chunk.contiguous()
-        if i == num_chunks - 1 and dec_overlap is not None:
-            write_part(dec_overlap)
-            dec_overlap = None
-        del clip_dec
+                clip_dec = next_remote(i, owner - 1)
+            for j in range(split_count):
+                f_start_idx = j * chunk_dec
+                f_end_idx = min(f_start_idx + chunk_dec, clip_dec.shape[2])
+                clip_dec_chunk = clip_dec[:, :, f_start_idx:f_end_idx, :, :]
+                clip_dec_chunk = clip_dec_chunk[:, :, m0.frame_pre_padding:, :, :]
+                if j == 0:
+                    if dec_overlap is not None:
+                        clip_dec_chunk = m0.blend(dec_overlap, clip_dec_chunk, m0.frame_overlap, dim=-3)
+                        dec_overlap = None
+                    write_part(clip_dec_chunk)
+                else:
+                    dec_overlap = clip_dec_chunk.contiguous()
+            if i == num_chunks - 1 and dec_overlap is not None:
+                write_part(dec_overlap)
+                dec_overlap = None
+            del clip_dec
 
-    for k in range(len(workers)):
-        while not done[k]:
-            pump(k)
-        if remote[k]:
-            workers[k].jobs_done += 1
+        for k in range(len(workers)):
+            while not done[k]:
+                pump(k)
+            if remote[k]:
+                workers[k].jobs_done += 1
+    except BaseException:
+        if transport == "bytes":
+            # a worker left mid-job blocks writing chunk bytes nobody reads, and then never reads its next job
+            for w, d in zip(workers, done):
+                if not d:
+                    w.kill("decode stopped mid-job")
+        raise
 
     log.info("[VAE split] decode jobs %s done in %.1fs: local %.1fs on %s (peak %.1f GiB), waited %.1fs for workers | %s",
              job_ids, time.perf_counter() - t_start, local_seconds, dev0, torch.cuda.max_memory_allocated(dev0) / 2**30,
